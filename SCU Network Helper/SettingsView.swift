@@ -13,6 +13,7 @@ struct SettingsView: View {
     @AppStorage("serviceName") private var serviceName = "EDUNET"
     @AppStorage("isAutoLoginEnabled") private var isAutoLoginEnabled = false
     @AppStorage("pingAddress") private var pingAddress = "222.220.212.130"
+    @AppStorage("SSID") private var SSID = "SCUNET"
     
     @State private var inputPassword = ""
     @State private var hasSavedPassword = false

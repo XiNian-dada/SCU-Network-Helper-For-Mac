@@ -31,7 +31,7 @@ struct PopoverContentView: View {
                     // 动态颜色显示状态
                     Text(networkManager.connectionStatus)
                         .font(.headline)
-                        .foregroundColor((networkManager.connectionStatus == "登录成功" || networkManager.connectionStatus == "已在线" || networkManager.connectionStatus == "休眠") ? .green : .orange)
+                        .foregroundColor((networkManager.connectionStatus == "登录成功" || networkManager.connectionStatus == "已在线" || networkManager.connectionStatus == "休眠" || networkManager.connectionStatus == "一般Wi-Fi") ? .green : .orange)
                 }
                 
                 Button(action: {

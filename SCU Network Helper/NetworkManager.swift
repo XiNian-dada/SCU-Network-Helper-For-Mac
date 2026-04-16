@@ -13,12 +13,15 @@
 import Foundation
 import Combine
 import Network // 🌟 引入苹果底层网络框架，实现零功耗物理监听
+import CoreWLAN
+import CoreLocation
 
-class NetworkManager: ObservableObject {
+class NetworkManager: NSObject,ObservableObject,CLLocationManagerDelegate {
     static let shared = NetworkManager()
     
     @Published var connectionStatus: String = "未登录"
     @Published var isLoggingIn: Bool = false
+    @Published var hasLocationPermission: Bool = false
     
     private let mainURL = "http://192.168.2.135/"
     
@@ -33,10 +36,42 @@ class NetworkManager: ObservableObject {
     // 🌟 自动化控制句柄
     private var networkMonitor: NWPathMonitor?
     private var pingTask: Task<Void, Never>?
+    private let locationManager = CLLocationManager()
     
-    init() {
-        // App 启动时，直接挂载底层物理网络监听器
+    override init() {
+        super.init()
+        // 设置代理
+        locationManager.delegate = self
+        // 1. 检查当前的权限状态
+        let status = locationManager.authorizationStatus
+        self.hasLocationPermission = (status == .authorized || status == .authorizedAlways)
+        
+        if status == .notDetermined {
+            // 如果用户还没做决定（初次启动），只请求权限，不启动网络监听！
+            print("🛡️ 初次启动，等待用户授予位置权限...")
+            locationManager.requestAlwaysAuthorization()
+        } else {
+            // 如果以前已经授权过（或拒绝过），直接启动网络监听
+            print("🛡️ 权限已确认，直接启动网络监听...")
+            setupNativeNetworkMonitor()
+        }
+        
+        // 2. App 启动时，直接挂载底层物理网络监听器
         setupNativeNetworkMonitor()
+    }
+    
+    // 🌟 监听通知（Delegate 回调）：只有当权限改变时，才更新我们的变量
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        let status = manager.authorizationStatus
+        // 更新缓存变量
+        self.hasLocationPermission = (status == .authorized || status == .authorizedAlways)
+        
+        if status != .notDetermined {
+            print("🛡️ 权限状态发生改变: \(status.rawValue)")
+            if self.networkMonitor == nil {
+                setupNativeNetworkMonitor()
+            }
+        }
     }
     
     // ==========================================
@@ -53,16 +88,62 @@ class NetworkManager: ObservableObject {
             let detectIf = UserDefaults.standard.string(forKey: "detectInterface") ?? "en0"
             let isAutoLoginEnabled = UserDefaults.standard.bool(forKey: "isAutoLoginEnabled")
             
+            //目标SSID
+            let targetSSID = UserDefaults.standard.string(forKey : "SSID") ?? "SCUNET"
+            
             // 检查指定的网卡是否在活跃列表中
             let isTargetInterfaceActive = path.availableInterfaces.contains(where: { $0.name == detectIf })
             
             if isTargetInterfaceActive && path.status == .satisfied && isAutoLoginEnabled {
-                print("🔌 [物理层] 网卡 \(detectIf) 已连通，正在唤醒心跳探测引擎...")
-                DispatchQueue.main.async {
-                    self.connectionStatus = "网卡已连接"
+                
+                print("🔌 [物理层] 网卡 \(detectIf) 已连通")
+                // 🧐 逻辑判断：
+                // 如果是 Wi-Fi 网络，必须匹配 "SCUNET" 才放行, 如果无法获取SSID也放行
+                // 如果是 有线网络 (例如在宿舍用了扩展坞插网线)，是没有 SSID 的，直接放行
+                let isWiFi = path.usesInterfaceType(.wifi)
+                
+                if !isWiFi {
+                    print("🔌 \(detectIf) 接入有线网络，正在唤醒心跳探测引擎...")
+                    DispatchQueue.main.async {
+                        self.connectionStatus = "有线网络已连接"
+                    }
+                    self.startPingLoop()
+                }
+                else if self.hasLocationPermission{
+                    let currentSSID = self.getCurrentSSID(interfaceName: detectIf)
+                    if currentSSID == nil{
+                        print("🔌 \(detectIf) 获取Wi-Fi名称失败，正在唤醒心跳探测引擎...")
+                        DispatchQueue.main.async {
+                            self.connectionStatus = "接入未知Wi-Fi"
+                        }
+                        self.startPingLoop()
+                    }
+                    else{
+                        if currentSSID == targetSSID {
+                            print("🔌 \(detectIf) 接入SCUNET，正在唤醒心跳探测引擎...")
+                            DispatchQueue.main.async {
+                                self.connectionStatus = "接入SCUNET"
+                            }
+                            self.startPingLoop()
+                        }
+                        else{
+                            print("🔌 \(detectIf) 接入非校园网Wi-Fi")
+                            DispatchQueue.main.async {
+                                self.connectionStatus = "一般Wi-Fi"
+                            }
+                            self.stopPingLoop()
+                        }
+                    }
+                    
+                }
+                else{
+                    print("🔌 \(detectIf) 无位置权限，正在唤醒心跳探测引擎...")
+                    DispatchQueue.main.async {
+                        self.connectionStatus = "接入未知Wi-Fi"
+                    }
+                    self.startPingLoop()
                 }
                 
-                self.startPingLoop()
             } else {
                 print("💤 [物理层] 网卡 \(detectIf) 已断开或未开启重连，彻底休眠，释放 CPU。")
                 DispatchQueue.main.async {
@@ -97,7 +178,7 @@ class NetworkManager: ObservableObject {
                 let isAlive = await ping(address: address, interface: detectIf)
                 
                 if !isAlive {
-                    print("💔 [心跳探测] 网卡 \(detectIf) 无法 Ping 通外网，触发自动重连！")
+                    print("💔 [心跳探测] 网卡 \(detectIf) 无法 Ping 通检测地址，触发自动重连！")
                     let username = UserDefaults.standard.string(forKey: "username") ?? ""
                     let service = UserDefaults.standard.string(forKey: "serviceName") ?? "EDUNET"
                     let password = KeychainHelper.standard.readPassword() ?? ""
@@ -106,6 +187,9 @@ class NetworkManager: ObservableObject {
                         await MainActor.run { self.connectionStatus = "断网重连中..." }
                         await self.login(userId: username, pass: password, service: service, interface: loginIf)
                     }
+                }
+                else{
+                    await MainActor.run { self.connectionStatus = "已在线" }
                 }
             }
         }
@@ -252,6 +336,21 @@ class NetworkManager: ObservableObject {
             }
         }
     }
+    
+    // ==========================================
+    // MARK: - 📡 CoreWLAN 辅助方法
+    // ==========================================
+    
+    /// 获取指定网卡的 SSID (需要关闭沙盒，并在最新的 macOS 申请位置权限)
+    private func getCurrentSSID(interfaceName: String) -> String? {
+        // 使用 CWWiFiClient 获取特定名称（如 en0）的网卡接口，并读取 SSID
+        if let interface = CWWiFiClient.shared().interface(withName: interfaceName) {
+            return interface.ssid()
+        }
+        return nil
+    }
+    
+    
     
     // ==========================================
     // MARK: - ✂️ 辅助文本解析方法
